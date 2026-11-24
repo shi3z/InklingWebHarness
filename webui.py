@@ -200,7 +200,7 @@ def make_emit(job):
     return emit
 
 
-def workdir(job): return os.path.join(ROOT, "workspace", job["id"])      # one folder per task: parallel tasks do not trample each other
+def workdir(job): return job.get("wd") or os.path.join(ROOT, "workspace", job["id"])      # one folder per task: parallel tasks do not trample each other
 
 
 def launch(job, fn, *args):
@@ -391,9 +391,50 @@ def load_old_jobs():
         job["emit"] = lambda e: None; JOBS[jid] = job
 
 
+REVIEWS = os.path.join(DATA, "reviews.jsonl")
+
+
+def reviewable(job):
+    return job.get("kind") == "agent" and job.get("status") == "done" and any((job.get("phase") or "").startswith(p) for p in ("Needs review", "Aborted", "Error"))
+
+
+def review_job(jid, action, note, steps):
+    """A human decision on a task that stopped without a verified answer: continue it (new task, same work folder), accept it, or dismiss it."""
+    j = JOBS.get(jid)
+    if not j or not reviewable(j): return dict(error="this task is not waiting for review")
+    row = dict(id=jid, action=action, note=note[:2000], t=time.time())
+    if action == "continue":
+        if not healthy("inkling"): return dict(error="the engine is not running: press Start and wait until it says running")
+        first = next((x.get("text", "") for x in j["ev"] if x.get("node") == "GENERATE"), j.get("title", ""))
+        rep_ = next((x.get("code") or x.get("text", "") for x in reversed(j["ev"]) if x.get("node") in ("RESULT", "ESCALATE", "ERROR")), "(no status report)")
+        wd = workdir(j)
+        prompt = ("%s\n\n## This is a continuation\nAn earlier attempt stopped (%s). Its files are already in the work folder %s: look there first instead of starting over. "
+                  "The old conversation is not available to you, so rely on the files and on this report of the previous attempt:\n%s\n\n## Reviewer instruction\n%s" %
+                  (first, j.get("phase"), wd, str(rep_)[:6000], note.strip() or "Continue where it stopped and finish the task."))[:20000]
+        nj = new_job("agent", "[continued] " + (j.get("title") or jid)); nj["wd"] = wd; nj["parent"] = jid
+        launch(nj, run_agent, prompt, max(1, min(80, steps)), 16000, 900, "key", DEFAULT_CTX, "medium")
+        row["new"] = nj["id"]; j["review"] = "continued"; j["phase"] = "Continued as " + nj["id"]
+    elif action == "accept": j["phase"] = "Done (accepted by reviewer)"
+    elif action == "dismiss": j["phase"] = "Dismissed by reviewer"
+    else: return dict(error="unknown action")
+    open(REVIEWS, "a").write(json.dumps(row) + "\n")
+    return dict(ok=True, new=row.get("new"))
+
+
+def apply_reviews():
+    for r in jl(REVIEWS):
+        j = JOBS.get(r.get("id"))
+        if j and r.get("action") == "accept": j["phase"] = "Done (accepted by reviewer)"
+        elif j and r.get("action") == "dismiss": j["phase"] = "Dismissed by reviewer"
+        elif j and r.get("action") == "continue":
+            j["phase"] = "Continued as %s" % r.get("new")
+            n = JOBS.get(r.get("new"))
+            if n: n["wd"] = workdir(j); n["parent"] = j["id"]
+
+
 def job_view(job):
     d = {k: v for k, v in job.items() if k not in ("proc", "ev", "sb", "eng", "seng", "emit", "media_seen", "mfiles", "mindex", "last_cmd", "notices", "killed_ports", "cmd_active")}
-    d["events"] = len(job["ev"])
+    d["events"] = len(job["ev"]); d["reviewable"] = reviewable(job); d["workdir"] = workdir(job)
     d["apps"] = [dict(port=p, url=a["url"], alive=a["alive"], direct=a["direct"], error=a["error"]) for p, a in APPS.items() if a["job"] == job["id"]]
     d["elapsed"] = (job["ev"][-1]["t"] if job["ev"] else 0) if job["status"] == "done" else round(time.time() - job["t"], 1); return d
 
@@ -430,7 +471,7 @@ CSS = ("body{font:14px system-ui,sans-serif;margin:20px auto;max-width:1100px;pa
        "pre{background:#f7f7f7;padding:10px;overflow:auto;white-space:pre-wrap;margin:4px 0}textarea,input,select{font:inherit;width:100%;box-sizing:border-box}"
        "textarea{min-height:90px}button{font:inherit;padding:6px 14px;margin:4px 4px 4px 0;cursor:pointer}.row{display:flex;gap:12px}.row>*{flex:1}"
        ".note{color:#666}.ev{border-left:4px solid #ccc;padding-left:8px;margin:8px 0}.GENERATE,.MODEL{border-color:#36c}.VERIFY{border-color:#c80}.DONE{border-color:#0a5}"
-       ".ESCALATE,.ERROR{border-color:#c00}.FIX{border-color:#a5a}.warn{background:#fff3cd;padding:8px;border-radius:4px}.ok{color:#064}.bad{color:#a00}")
+       ".ESCALATE,.ERROR{border-color:#c00}.FIX{border-color:#a5a}.warn{background:#fff3cd;padding:8px;border-radius:4px}.revbox{background:#fff3cd;border:2px solid #d9a400;border-radius:6px;padding:10px;margin:8px 0}.revbox textarea{width:100%;box-sizing:border-box;margin:6px 0}.revbox button{margin-right:6px}.ok{color:#064}.bad{color:#a00}")
 
 APP_JS = r"""
 const _errs={};
@@ -498,7 +539,7 @@ function onEv(ev){
    b.append(g); if(ev.total>ev.items.length)b.append(el('div','small','and '+(ev.total-ev.items.length)+' more ('+ev.all+' in this task)'));
    const l=el('a','','View all in gallery'); l.href='/gallery#'+S.job; l.target='_blank'; b.append(l); card('c-media','Generated videos and images ('+ev.total+')',b); break}
  case 'DONE': {banner('result','Done',ev.text,'good'); break}
- case 'ESCALATE': {banner('result','Human review needed','Limit reached. Added to the review queue.','bad'); card('c-bad','Human review needed',pre('',ev.text)); break}
+ case 'ESCALATE': {banner('result','Human review needed','Limit reached. Decide in the review box below: continue, accept or dismiss.','bad'); card('c-bad','Human review needed',pre('',ev.text)); break}
  case 'ERROR': {banner('result','Error / aborted',ev.text,'bad'); card('c-bad','Error',pre('',ev.text)); break}
  }}
 function attach(id){ if(S.es)S.es.close();
@@ -524,7 +565,7 @@ async function refreshEngine(){try{const s=(await api('/api/engines')).inkling;S
  $('#go').disabled=!s.up; $('#goeval').disabled=!s.up;
  $('#hint').textContent=s.up?'':'The engine is stopped. Press Start and wait until it shows Running.'}catch(x){}}
 // ---- task list (all jobs, live)
-function badge(j){ if(j.status==='queued')return['Queued','b-q']; if(j.status==='running')return['Running','b-r'];
+function badge(j){ if((j.phase||'').startsWith('Dismissed'))return['Dismissed','b-q']; if((j.phase||'').startsWith('Continued'))return['Continued','b-q']; if(j.status==='queued')return['Queued','b-q']; if(j.status==='running')return['Running','b-r'];
   if((j.phase||'').includes('Done'))return['Done','b-ok']; if((j.phase||'').includes('Aborted')||(j.phase||'').includes('Error'))return['Aborted','b-bad']; return['Needs review','b-bad']}
 S.appEls={};
 function renderApps(apps){ const box=$('#apps'); const want=new Set();
@@ -535,7 +576,14 @@ function renderApps(apps){ const box=$('#apps'); const want=new Set();
       h.append(el('b','','▶ Launched app'),t,st,b1,b3); d.append(h); box.append(d); S.appEls[k]=d }
     d.classList.toggle('dead',!a.alive); d.querySelector('.ast').textContent=a.alive?' (listening on 0.0.0.0)':' (stopped)'; }
   for(const k of Object.keys(S.appEls)) if(!want.has(k)){S.appEls[k].remove(); delete S.appEls[k]} }
-async function pollJobs(){ try{ const js=await api('/api/jobs'); const box=$('#jobs'); const cur=js.find(j=>j.id===S.job); if(cur)renderApps(cur.apps); const keep=box.scrollTop; box.querySelectorAll('.job').forEach(n=>n.remove());
+function renderReview(cur){ const box=$('#review'); const key=cur&&cur.reviewable?cur.id+'|'+cur.phase:''; if(S.revKey===key)return; S.revKey=key; box.replaceChildren(); if(!key)return;
+  const w=el('div','revbox'); w.append(el('b','','Needs your review: '+cur.phase),el('div','small','The agent stopped without a verified answer. Read its status report below, then decide. Work folder: '+cur.workdir));
+  const ta=document.createElement('textarea'); ta.placeholder='Instruction for the agent (optional). Example: the page is blank, check the console errors first.'; ta.rows=3;
+  const st=document.createElement('input'); st.type='number'; st.value=40; st.min=1; st.max=80; st.style.width='5em';
+  const go=async a=>{ try{ const r=await api('/api/job/review',{id:cur.id,action:a,note:ta.value,steps:+st.value}); S.revKey=null; if(r.new){location.hash='job='+r.new; attach(r.new)} pollJobs() }catch(e){alert(e.message)} };
+  const b1=el('button','','Continue in the same work folder'); b1.onclick=()=>go('continue'); const b2=el('button','','Accept as done'); b2.onclick=()=>go('accept'); const b3=el('button','','Dismiss'); b3.onclick=()=>go('dismiss');
+  const lab=el('label','small','Max steps for the continuation '); lab.append(st); w.append(ta,lab,b1,b2,b3); box.append(w)}
+async function pollJobs(){ try{ const js=await api('/api/jobs'); const box=$('#jobs'); const cur=js.find(j=>j.id===S.job); if(cur)renderApps(cur.apps); renderReview(cur); const keep=box.scrollTop; box.querySelectorAll('.job').forEach(n=>n.remove());
   const run=js.filter(j=>j.status==='running').length, q=js.filter(j=>j.status==='queued').length; $('#jobsum').textContent='Running '+run+' / Queued '+q+' / Total '+js.length;
   for(const j of js){ const [b,bc]=badge(j); const d=el('div','job '+(j.id===S.job?'sel ':'')+(j.status==='done'?'fin':'')); d.dataset.id=j.id;
     const t=el('div','jt',j.title||j.id); const m=el('div','jm'); m.append(el('span','badge '+bc,b),el('span','',' '+fmt(j.elapsed)+(j.step?' · step '+j.step:'')+(j.ncmd?' · commands '+j.ncmd:'')));
@@ -596,7 +644,7 @@ def console():
         "<div><label><input id=judge type=checkbox style='width:auto'> LLM judge</label></div></div><button id=goeval disabled>Run evaluation</button><pre id=evlog></pre></details>"
         "<div class=now id=now><div id=nowtitle></div><div id=nowsub></div><div><span id=clock></span><span id=rate></span><button id=stop disabled style='float:right'>Cancel this task</button></div>"
         "<div id=stall style='color:#ffd54a;font-size:13px'></div><div class=steps>%s</div></div>"
-        "<div id=apps></div><div id=timeline></div><p><a href='/gallery' target=_blank>Media gallery (videos and images)</a> · <a href='/dashboard'>Dashboard (results, review queue, failures)</a></p></main>") % steps
+        "<div id=review></div><div id=apps></div><div id=timeline></div><p><a href='/gallery' target=_blank>Media gallery (videos and images)</a> · <a href='/dashboard'>Dashboard (results, review queue, failures)</a></p></main>") % steps
     return page("InklingWebHarness console", "<h1>InklingWebHarness console <span class=note>Inkling-2-Mini · up to %d parallel</span></h1>%s<div class=layout>%s%s</div>" % (MAX_PARALLEL, warn, side, main), APP_JS)
 
 
@@ -605,7 +653,7 @@ def dashboard():
     r1 = table(["name", "bench", "n", "first try %", "final %", "escalated", "mean attempts", "tokens", "wall s"],
                [[e(str(r.get(k, "-"))) for k in ("name", "bench", "n", "first_try_pct", "final_pct", "escalated", "mean_attempts", "total_tokens", "wall_s")] for r in runs])
     hr = jl(os.path.join(DATA, "human_review.jsonl"))
-    r2 = table(["task", "node", "final", "attempts", "reason"], [[e(str(x.get(k))) for k in ("task_id", "node", "final", "attempts", "reason")] for x in hr[-30:]])
+    r2 = table(["task", "node", "final", "attempts", "reason"], [[("<a href='/#job=%s'>%s</a>" % (e(str(x.get(k))), e(str(x.get(k))))) if k == "task_id" else e(str(x.get(k))) for k in ("task_id", "node", "final", "attempts", "reason")] for x in hr[-30:]])
     fl = jl(os.path.join(DATA, "failures.jsonl"))
     r3 = table(["task", "run", "error tail"], [[e(str(x.get("task_id"))), e(str(x.get("name"))), e(str(x.get("err"))[-120:])] for x in fl[-30:]])
     ls = "<ul>%s</ul>" % "".join("<li>%s</li>" % e(x.get("text", "")) for x in jl(os.path.join(DATA, "lessons.jsonl"))[-15:])
@@ -782,6 +830,9 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/engine/stop": return J(dict(msg=stop_engine(str(b.get("name")))))
         if u.path == "/api/app/stop":
             return J(dict(msg=stop_app(int(b.get("port", 0)))))
+        if u.path == "/api/job/review":
+            r = review_job(str(b.get("id")), str(b.get("action")), str(b.get("note", "")), int(b.get("steps", 40)))
+            return self.send(409, r["error"]) if r.get("error") else self.send(200, json.dumps(r), "application/json")
         if u.path == "/api/job/cancel":
             j = JOBS.get(str(b.get("id")))
             if not j or j["status"] == "done": return self.send(404, "no such running job")
@@ -821,7 +872,7 @@ def main():
     host = a.host or subprocess.check_output(["tailscale", "ip", "-4"], text=True).split()[0]
     global TAILNET_IP
     TAILNET_IP = host
-    load_old_jobs()
+    load_old_jobs(); apply_reviews()
     threading.Thread(target=watch_apps, daemon=True).start()
     ThreadingHTTPServer.daemon_threads = True
     srv = ThreadingHTTPServer((host, a.port), H)

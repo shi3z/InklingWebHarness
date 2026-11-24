@@ -50,6 +50,9 @@ stored in a `SameSite=Strict` cookie after the first visit. The engine command a
 * **"What is happening now" banner** with a six-step bar (send / think / write / run / result / return), elapsed time, and a stall warning.
 * **Live timeline** of thinking, answer, tool-call building, commands with streaming output, results, supervisor verdicts,
   compactions and notices. Task history is restored from `data/jobs/*.jsonl` after a restart.
+* **Review of stopped tasks.** When an agent task ends as "Needs review" (step cap, error, console restart), a review box appears above the timeline:
+  **Continue in the same work folder** (starts a new task with the original request, the previous status report and your optional instruction; files
+  already in the folder are kept), **Accept as done**, or **Dismiss**. Decisions are stored in `data/reviews.jsonl` and survive restarts.
 * **Media.** Images and videos the agent produces (also frames cut from videos) are shown inline and in `/gallery`.
 * **Started servers.** Listeners started by a task are detected and listed with a link, an open-in-new-tab button and a stop button.
   (Embedding in an iframe was dropped: heavy pages such as three.js apps made the console hang.)
