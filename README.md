@@ -11,6 +11,15 @@ generated images/videos, and the servers the agent started.
 > token can do the same. Run it on a machine and network you trust (it binds to your tailnet IP by default and requires a random
 > token). `--sandbox` adds only a *soft* guard (temp dir, rlimits, scrubbed env); it is **not** a security boundary.
 
+## Demo
+
+[![Demo screenshot](docs/demo.png)](docs/demo.mp4)
+
+[`docs/demo.mp4`](docs/demo.mp4) (74 s, real run, not mocked): the task "make a small web page with a canvas animation of a bouncing ball, serve it in the
+background, check it with curl, and take a screenshot" is typed into the console. You can see the model's live thinking, the command it builds and
+runs with streaming output, the detected server (`0.0.0.0:18401`), the generated screenshot, the supervisor review in a separate context and its verdict,
+and the final answer. The host name and user name in the recording are replaced with placeholders.
+
 ## Files
 
 | File | What it is |
