@@ -15,7 +15,7 @@ generated images/videos, and the servers the agent started.
 
 | File | What it is |
 |---|---|
-| `yharness.py` | The harness: engine client (streaming), tool-calling agent loop, supervisor, context compaction + `recall`, tripwires, code-generation graph (generate -> verify -> fix), evaluation helpers. Standard library only. |
+| `inkling_web_harness.py` | The harness: engine client (streaming), tool-calling agent loop, supervisor, context compaction + `recall`, tripwires, code-generation graph (generate -> verify -> fix), evaluation helpers. Standard library only. |
 | `webui.py` | The web console (standard library only): task list, parallel jobs, SSE streaming, media gallery, started-app panel, engine start/stop. |
 | `eval/run.py` | Small HumanEval / MBPP runner against any OpenAI-compatible server (datasets not included). |
 
@@ -81,7 +81,7 @@ supervisor:  a separate agent, fresh context on every review, sees only a digest
 The harness began as an implementation of the four areas from Google Cloud Tech's "AI harness crash course"
 (`https://www.youtube.com/watch?v=2C_CefSQEAQ`):
 
-| Area in the video | In `yharness.py` |
+| Area in the video | In `inkling_web_harness.py` |
 |---|---|
 | Session | `Session`: every message and tool result logged to `data/sessions/` |
 | State | `State`: `data/state.json` (prompt-strategy statistics) |
@@ -94,7 +94,7 @@ The harness began as an implementation of the four areas from Google Cloud Tech'
 Failures are appended to `data/failures.jsonl` (a growing regression set, `--replay-failures`); `--strategy auto` picks a prompt
 strategy per task with a UCB bandit. The graph itself does not rewrite its own nodes, and `--forever` is untested beyond a few cycles.
 
-CLI example: `python3 yharness.py --url http://127.0.0.1:8767/v1 --name test --n 40 --strategy auto --judge`
+CLI example: `python3 inkling_web_harness.py --url http://127.0.0.1:8767/v1 --name test --n 40 --strategy auto --judge`
 
 ## Measured results (one sample per task, RTX A6000; +/-3 points is noise)
 
@@ -115,4 +115,4 @@ training data: they say little about real agentic coding.
 * Dev servers whose framework default is localhost-only (e.g. Vite) are stopped by the watcher and must be restarted on `0.0.0.0`;
   this flow is tested with synthetic listeners and one agent run, not with every framework.
 * The console is plain HTTP; use it only on a private network such as a tailnet.
-* Paths for the engine presets and `~/rrr/workspace` are hard-coded defaults; change them in `webui.py` / `yharness.py`.
+* Paths for the engine presets and `~/rrr/workspace` are hard-coded defaults; change them in `webui.py` / `inkling_web_harness.py`.

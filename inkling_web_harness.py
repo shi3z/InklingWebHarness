@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""yharness - a small harness around any OpenAI-compatible local engine (YASAKANI `serve`, llama-server, ...).
+"""InklingWebHarness - a small harness around any OpenAI-compatible local engine (YASAKANI `serve`, llama-server, ...).
 
 Maps the four areas of Google Cloud Tech's "AI harness crash course" onto code:
   1 context & memory : Session (full transcript, jsonl) / State (key-value, state.json) / LongTermMemory (lessons.jsonl)

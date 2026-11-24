@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Web console for yharness (standard library only): dashboard + give tasks to the harness + start/stop engines + start eval runs.
+"""Web console for InklingWebHarness (standard library only): dashboard + give tasks to the harness + start/stop engines + start eval runs.
 
 SECURITY - read this: the console can make this computer run Python code (model-written code, and tests you type). The sandbox in
-yharness.py is a soft guard (temp dir, rlimits, scrubbed env, socket guard); user namespaces are not available here, so it is NOT a
+inkling_web_harness.py is a soft guard (temp dir, rlimits, scrubbed env, socket guard); user namespaces are not available here, so it is NOT a
 security boundary: code can read your files. Therefore:
   * a random token is required for everything (data/web_token, mode 600); it is checked on every request,
   * it binds to this machine's tailnet IPv4 only, never 0.0.0.0,
@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib import request as urlreq
 from urllib.parse import urlparse, parse_qs, unquote, quote
 
-import yharness as Y
+import inkling_web_harness as Y
 
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 DATA = Y.DATA; EVAL = Y.EVAL
@@ -267,7 +267,7 @@ def run_agent(job, prompt, max_steps, max_tokens, wall, sup_mode="key", ctx_limi
 
 def run_eval(job, n, retries, strategy, judge):
     emit = job["emit"]; p = PRESETS["inkling"]; log = os.path.join(JOBS_DIR, job["id"] + ".log")
-    cmd = [sys.executable, os.path.join(HERE, "yharness.py"), "--url", "http://127.0.0.1:%d/v1" % p["port"], "--model", p["model"], "--name", "web_" + job["id"],
+    cmd = [sys.executable, os.path.join(HERE, "inkling_web_harness.py"), "--url", "http://127.0.0.1:%d/v1" % p["port"], "--model", p["model"], "--name", "web_" + job["id"],
            "--n", str(n), "--retries", str(retries), "--strategy", strategy, "--temperature", str(p["sampling"]["temperature"]), "--top-p", str(p["sampling"]["top_p"]),
            "--extra", json.dumps(p["sampling"]["extra"]), "--replay-failures"] + (["--judge"] if judge else [])
     emit(dict(node="CMD", text="$ " + " ".join(cmd[1:6]) + " ..."))
@@ -597,7 +597,7 @@ def console():
         "<div class=now id=now><div id=nowtitle></div><div id=nowsub></div><div><span id=clock></span><span id=rate></span><button id=stop disabled style='float:right'>Cancel this task</button></div>"
         "<div id=stall style='color:#ffd54a;font-size:13px'></div><div class=steps>%s</div></div>"
         "<div id=apps></div><div id=timeline></div><p><a href='/gallery' target=_blank>Media gallery (videos and images)</a> · <a href='/dashboard'>Dashboard (results, review queue, failures)</a></p></main>") % steps
-    return page("yharness console", "<h1>yharness console <span class=note>Inkling-2-Mini · up to %d parallel</span></h1>%s<div class=layout>%s%s</div>" % (MAX_PARALLEL, warn, side, main), APP_JS)
+    return page("InklingWebHarness console", "<h1>InklingWebHarness console <span class=note>Inkling-2-Mini · up to %d parallel</span></h1>%s<div class=layout>%s%s</div>" % (MAX_PARALLEL, warn, side, main), APP_JS)
 
 
 def dashboard():
@@ -613,7 +613,7 @@ def dashboard():
     for d in sorted(glob.glob(os.path.join(DATA, "sessions", "*"))):
         n = os.path.basename(d); files = sorted(os.listdir(d), key=lambda f: -os.path.getmtime(os.path.join(d, f)))
         sess.append([e(n), str(len(files)), " ".join("<a href='/session/%s/%s'>%s</a>" % (e(n), e(f), e(f[:-6])) for f in files[:40])])
-    return page("yharness dashboard", "<p><a href='/'>&larr; console</a></p><h1>Dashboard</h1><h2>Eval runs</h2>%s<h2>Human review (latest 30 of %d)</h2>%s"
+    return page("InklingWebHarness dashboard", "<p><a href='/'>&larr; console</a></p><h1>Dashboard</h1><h2>Eval runs</h2>%s<h2>Human review (latest 30 of %d)</h2>%s"
                 "<h2>Failure set (latest 30 of %d)</h2>%s<h2>Lessons</h2>%s<h2>Sessions</h2>%s" % (r1, len(hr), r2, len(fl), r3, ls, table(["run", "tasks", "transcripts"], sess)))
 
 
@@ -825,7 +825,7 @@ def main():
     threading.Thread(target=watch_apps, daemon=True).start()
     ThreadingHTTPServer.daemon_threads = True
     srv = ThreadingHTTPServer((host, a.port), H)
-    print("yharness console: http://%s:%d/?token=%s   (code execution %s, sandbox %s)" % (host, a.port, TOKEN, "OFF" if NO_EXEC else "ON", "ON" if SANDBOX else "OFF"), flush=True)
+    print("InklingWebHarness console: http://%s:%d/?token=%s   (code execution %s, sandbox %s)" % (host, a.port, TOKEN, "OFF" if NO_EXEC else "ON", "ON" if SANDBOX else "OFF"), flush=True)
     srv.serve_forever()
 
 
