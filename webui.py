@@ -370,6 +370,11 @@ def new_job(kind, title=""):
 
 def load_old_jobs():
     """After a restart the in-memory jobs are gone, but every event was written to data/jobs/<id>.jsonl: read them back (read-only history)."""
+    parents = {r["new"]: r["id"] for r in jl(REVIEWS) if r.get("action") == "continue" and r.get("new")}      # a continued task works in its parent's folder
+    def folder(i):
+        seen = 0
+        while i in parents and seen < 50: i = parents[i]; seen += 1
+        return os.path.join(ROOT, "workspace", i)
     for p in sorted(glob.glob(os.path.join(JOBS_DIR, "*.jsonl"))):
         jid = os.path.basename(p)[:-6]
         if jid in JOBS or not SAFE.match(jid): continue
@@ -378,6 +383,7 @@ def load_old_jobs():
         first = next((x for x in ev if x.get("node") == "GENERATE"), {})
         job = dict(id=jid, kind=jid.split("_")[0], status="done", ev=ev, t=os.path.getmtime(p) - ev[-1].get("t", 0), title=((first.get("text") or jid).strip().splitlines() or [jid])[0][:80], step=0,
                    ncmd=sum(1 for x in ev if x.get("node") == "CMD"), cmd="", last_out="", restored=True)
+        if jid in parents: job["wd"] = folder(jid); job["parent"] = parents[jid]
         last = ev[-1].get("node"); job["phase"] = {"DONE": "Done", "RESULT": "Done", "ESCALATE": "Needs review (limit reached)", "ERROR": "Error / aborted"}.get(last, "Aborted (console restarted)")
         if last == "RESULT": job["phase"] = "Done" if not any(x.get("node") in ("ESCALATE", "ERROR") for x in ev[-3:]) else "Needs review (limit reached)"
         for x in ev:                                            # the /m/<job>/<n>/<name> registry lives in memory: rebuild it from the MEDIA events
@@ -748,6 +754,8 @@ class H(BaseHTTPRequestHandler):
     def sse_start(self):
         self.send_response(200); self.send_header("Content-Type", "text/event-stream"); self.send_header("Cache-Control", "no-store"); self.send_header("X-Accel-Buffering", "no")
         self.send_header("Content-Security-Policy", "default-src 'none'"); self.end_headers(); self.close_connection = True
+        try: self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)       # many small writes + Nagle + delayed ACK = tens of ms each over a real network
+        except OSError: pass
 
     def sse_write(self, data, event=None):
         self.wfile.write(((("event: %s\n" % event) if event else "") + "data: %s\n\n" % data).encode()); self.wfile.flush()
@@ -758,6 +766,14 @@ class H(BaseHTTPRequestHandler):
         try:
             while True:
                 evs = job["ev"]; n = len(evs)
+                if not synced and n > sent:                     # the replay: merge runs of streamed tokens and send everything in ONE write (a long task has 10,000+ events)
+                    out = []; run = None
+                    for x in evs[sent:n]:
+                        if x.get("node") in ("DELTA", "SUP_DELTA"):
+                            if run and run["node"] == x["node"] and run.get("kind") == x.get("kind"): run["text"] += x.get("text", ""); run["t"] = x.get("t", run.get("t")); continue
+                            run = dict(x); out.append(run)
+                        else: run = None; out.append(x)
+                    self.wfile.write("".join("data: %s\n\n" % json.dumps(x, ensure_ascii=False) for x in out).encode()); self.wfile.flush(); sent = n; idle = 0
                 while sent < n: self.sse_write(json.dumps(evs[sent], ensure_ascii=False)); sent += 1; idle = 0
                 if not synced:                                  # the replay has caught up: tell the page how old the job is, so its clocks are right
                     synced = True; self.sse_write(json.dumps(dict(elapsed=job_view(job)["elapsed"], status=job["status"], queued=job["status"] == "queued")), "sync")
