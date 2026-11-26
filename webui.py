@@ -32,10 +32,17 @@ PRESETS = {
                     env={"LD_LIBRARY_PATH": ROOT + "/llama.cpp-inkling/build/bin"},
                     sampling=dict(temperature=1.0, top_p=1.0, extra={"top_k": 0})),
 }
+PRESETS["mikasa"] = dict(label="Inkling-2-Mini Q4_K_XL (mikasa CUDA daemon)", port=8767, model="inkling", slots=4, ctx_per_slot=65536,
+                         cmd=[ROOT + "/venv-conv/bin/python", ROOT + "/mikasa/server/mikasa_server.py", "--port", "8767", "--host", "127.0.0.1", "--engine", "daemon", "--launch-daemon",
+                              "--model", ROOT + "/gguf/Inkling-2-Mini-UD-Q4_K_XL.gguf", "--daemon-bin", ROOT + "/mikasa/mikasa_daemon", "--daemon-sock", "/tmp/mikasa-daemon-8767.sock",
+                              "--daemon-args", "--snaps 24"],
+                         env={},
+                         sampling=dict(temperature=1.0, top_p=1.0, extra={"top_k": 0}))
+ACTIVE = "inkling"     # which preset the console's (single) engine controls and jobs talk to; --engine mikasa selects the mikasa daemon (both listen on 8767, one GPU)
 PROCS = {}             # preset -> Popen started by this console
 JOBS = {}              # id -> dict
 LOCK = threading.Lock()
-MAX_PARALLEL = 4                        # = llama-server slots (-np); more jobs wait in a queue
+MAX_PARALLEL = 4                        # = llama-server slots (-np) = mikasa daemon slots; more jobs wait in a queue
 SEM = threading.BoundedSemaphore(MAX_PARALLEL)
 
 
@@ -47,16 +54,23 @@ def token():
 
 
 def healthy(name):
+    """Readiness = /health answers 200. Both presets use port 8767, so the engine kind is told apart by /props build_info ("mikasa" = the mikasa server)."""
     try:
-        with urlreq.urlopen("http://127.0.0.1:%d/health" % PRESETS[name]["port"], timeout=2) as f: return f.status == 200
+        with urlreq.urlopen("http://127.0.0.1:%d/health" % PRESETS[name]["port"], timeout=2) as f:
+            if f.status != 200: return False
+        with urlreq.urlopen("http://127.0.0.1:%d/props" % PRESETS[name]["port"], timeout=2) as f: is_mikasa = json.load(f).get("build_info") == "mikasa"
+        return is_mikasa == (name == "mikasa")
     except Exception: return False
 
 
 def engine_state():
-    return {n: dict(label=p["label"], up=healthy(n), mine=n in PROCS and PROCS[n].poll() is None) for n, p in PRESETS.items()}
+    st = {n: dict(label=p["label"], up=healthy(n), mine=n in PROCS and PROCS[n].poll() is None) for n, p in PRESETS.items()}
+    st["inkling"] = dict(st[ACTIVE])            # the UI's engine box always asks for "inkling": that is the active preset
+    return st
 
 
 def start_engine(name):
+    name = ACTIVE if name == "inkling" else name
     if name not in PRESETS: return "unknown engine"
     for other in PRESETS:                                     # one GPU: never two engines at once
         if other != name and healthy(other): return "stop '%s' first (one GPU)" % other
@@ -68,6 +82,7 @@ def start_engine(name):
 
 
 def stop_engine(name):
+    name = ACTIVE if name == "inkling" else name
     pr = PROCS.get(name)
     if pr and pr.poll() is None: os.killpg(pr.pid, signal.SIGTERM); return "stopping"
     # the console was restarted and lost its record: stop whatever listens on the preset's port, but only if it is our engine binary
@@ -89,9 +104,10 @@ def engine_ctx():
     """(context per slot, whether the slots SHARE one KV cache). With `-np 4 -c 262144` every slot owns 65536 tokens (not shared); an engine started
     with the automatic slot count shares one cache among all slots. (0, False) if unknown."""
     try:
-        with urlreq.urlopen("http://127.0.0.1:%d/props" % PRESETS["inkling"]["port"], timeout=3) as f:
+        with urlreq.urlopen("http://127.0.0.1:%d/props" % PRESETS[ACTIVE]["port"], timeout=3) as f:
             n = int(json.load(f).get("default_generation_settings", {}).get("n_ctx", 0))
-        head = open(os.path.join(DATA, "engine_inkling.log"), errors="replace").read(20000)
+        if ACTIVE == "mikasa": return n, False                  # every daemon slot owns n_ctx positions (4 x 64K, not shared)
+        head = open(os.path.join(DATA, "engine_%s.log" % ACTIVE), errors="replace").read(20000)
         return n, "kv_unified = 'true'" in head
     except Exception: return 0, False
 
@@ -223,7 +239,7 @@ def run_task(job, prompt, tests, retries, smoke, strategy, max_tokens=8192, wall
     emit = job["emit"]
     try:
         sess = Y.Session("web", job["id"])
-        r = Y.solve_free(prompt, tests, job.setdefault("eng", engine_for("inkling", max_tokens)), job.setdefault("sb", Y.Sandbox(isolated=SANDBOX, wall=wall, workdir=workdir(job))), sess, retries, strategy, smoke, emit=emit)
+        r = Y.solve_free(prompt, tests, job.setdefault("eng", engine_for(ACTIVE, max_tokens)), job.setdefault("sb", Y.Sandbox(isolated=SANDBOX, wall=wall, workdir=workdir(job))), sess, retries, strategy, smoke, emit=emit)
         job["result"] = {k: v for k, v in r.items() if k != "trace"}
         emit(dict(node="RESULT", code=r.get("code") or r.get("text", ""), verified=bool(r.get("verified")), final=r["node"], attempts=r.get("attempts")))
         if r["node"] == "ESCALATE":
@@ -241,7 +257,7 @@ def run_agent(job, prompt, max_steps, max_tokens, wall, sup_mode="key", ctx_limi
         job["media_seen"] = {}
         sup = None
         if sup_mode in ("key", "every"):                    # a separate agent in its own fresh context (own request, own prompt, own notes)
-            p = PRESETS["inkling"]
+            p = PRESETS[ACTIVE]
             seng = Y.Engine("http://127.0.0.1:%d/v1" % p["port"], p["model"], 0.7, 1.0, 3000, {"top_k": 0, "chat_template_kwargs": {"reasoning_effort": "low"}})
             job["seng"] = seng; sup = Y.Supervisor(seng, sup_mode)
         n_ctx, shared = engine_ctx()                          # never let the context outgrow what the engine has
@@ -252,7 +268,7 @@ def run_agent(job, prompt, max_steps, max_tokens, wall, sup_mode="key", ctx_limi
             emit(dict(node="NOTICE", text="context total limit lowered from %d to %d tokens: the engine has %d per slot%s." % (total, share, n_ctx, (" and the slots share it (%d running tasks)" % active) if shared else ""))); total = share
         ctx_limit = int(total * 0.75)                         # compaction threshold; the last quarter is the room for the recap turn (as in the paper)
         emit(dict(node="NOTICE", text="context: total limit %d tokens, compaction threshold %d tokens. The full log stays on disk (recall tool)." % (total, ctx_limit)))
-        r = Y.solve_agent(prompt, job.setdefault("eng", engine_for("inkling", max_tokens, effort)), sb, sess, max_steps, emit=emit, sup=sup, ctx_limit=ctx_limit,
+        r = Y.solve_agent(prompt, job.setdefault("eng", engine_for(ACTIVE, max_tokens, effort)), sb, sess, max_steps, emit=emit, sup=sup, ctx_limit=ctx_limit,
                          notice_hook=lambda: [job["notices"].pop(0) for _ in range(len(job.get("notices", [])))])
         job["result"] = {k: v for k, v in r.items() if k != "trace"}
         try: media_check(job)
@@ -266,7 +282,7 @@ def run_agent(job, prompt, max_steps, max_tokens, wall, sup_mode="key", ctx_limi
 
 
 def run_eval(job, n, retries, strategy, judge):
-    emit = job["emit"]; p = PRESETS["inkling"]; log = os.path.join(JOBS_DIR, job["id"] + ".log")
+    emit = job["emit"]; p = PRESETS[ACTIVE]; log = os.path.join(JOBS_DIR, job["id"] + ".log")
     cmd = [sys.executable, os.path.join(HERE, "inkling_web_harness.py"), "--url", "http://127.0.0.1:%d/v1" % p["port"], "--model", p["model"], "--name", "web_" + job["id"],
            "--n", str(n), "--retries", str(retries), "--strategy", strategy, "--temperature", str(p["sampling"]["temperature"]), "--top-p", str(p["sampling"]["top_p"]),
            "--extra", json.dumps(p["sampling"]["extra"]), "--replay-failures"] + (["--judge"] if judge else [])
@@ -410,7 +426,7 @@ def review_job(jid, action, note, steps):
     if not j or not reviewable(j): return dict(error="this task is not waiting for review")
     row = dict(id=jid, action=action, note=note[:2000], t=time.time())
     if action == "continue":
-        if not healthy("inkling"): return dict(error="the engine is not running: press Start and wait until it says running")
+        if not healthy(ACTIVE): return dict(error="the engine is not running: press Start and wait until it says running")
         first = next((x.get("text", "") for x in j["ev"] if x.get("node") == "GENERATE"), j.get("title", ""))
         rep_ = next((x.get("code") or x.get("text", "") for x in reversed(j["ev"]) if x.get("node") in ("RESULT", "ESCALATE", "ERROR")), "(no status report)")
         wd = workdir(j)
@@ -567,7 +583,7 @@ $('#stop').onclick=async()=>{try{await api('/api/job/cancel',{id:S.job});$('#now
 $('#estart').onclick=async()=>{alert((await api('/api/engine/start',{name:'inkling'})).msg);refreshEngine()};
 $('#estop').onclick=async()=>{alert((await api('/api/engine/stop',{name:'inkling'})).msg);refreshEngine()};
 async function refreshEngine(){try{const s=(await api('/api/engines')).inkling;S.engineUp=s.up;
- $('#estate').textContent=s.up?'Running':(s.mine?'Starting (loading model)':'Stopped'); $('#estate').className=s.up?'ok':'bad';
+ $('#estate').textContent=(s.label||'')+': '+(s.up?'Running':(s.mine?'Starting (loading model)':'Stopped')); $('#estate').className=s.up?'ok':'bad';
  $('#go').disabled=!s.up; $('#goeval').disabled=!s.up;
  $('#hint').textContent=s.up?'':'The engine is stopped. Press Start and wait until it shows Running.'}catch(x){}}
 // ---- task list (all jobs, live)
@@ -821,7 +837,7 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/engines": return self.send(200, json.dumps(engine_state()), "application/json")
         if u.path == "/api/runs": return self.send(200, json.dumps(load_runs()), "application/json")
         if u.path == "/api/jobs": return self.send(200, json.dumps([job_view(j) for j in sorted(JOBS.values(), key=lambda j: -j["t"])[:30]]), "application/json")
-        if u.path == "/api/enginelog": return self.sse_file(os.path.join(DATA, "engine_inkling.log"))
+        if u.path == "/api/enginelog": return self.sse_file(os.path.join(DATA, "engine_%s.log" % ACTIVE))
         m = re.match(r"^/api/stream/([\w.\-]+)$", u.path)
         if m and m.group(1) in JOBS: return self.sse_job(JOBS[m.group(1)])
         m = re.match(r"^/api/job/([\w.\-]+)$", u.path)
@@ -859,7 +875,7 @@ class H(BaseHTTPRequestHandler):
             if j.get("sb"): j["sb"].kill()                  # a command that is running right now
             return J(dict(msg="cancelling"))
         if u.path in ("/api/task", "/api/eval"):
-            if not healthy("inkling"): return self.send(409, "the engine is not running: press Start and wait until it says running")
+            if not healthy(ACTIVE): return self.send(409, "the engine is not running: press Start and wait until it says running")
             retries = max(0, min(6, int(b.get("retries", 3)))); strat = b.get("strategy") if b.get("strategy") in Y.STRATEGIES else "direct"
             if u.path == "/api/task":
                 prompt = str(b.get("prompt", ""))[:20000]; tests = str(b.get("tests", ""))[:20000]; verify = b.get("verify", "tests")
@@ -880,11 +896,12 @@ class H(BaseHTTPRequestHandler):
 
 
 def main():
-    global TOKEN, NO_EXEC, SANDBOX
+    global TOKEN, NO_EXEC, SANDBOX, ACTIVE
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=None, help="default: this machine's tailnet IPv4 (tailscale ip -4)")
+    ap.add_argument("--engine", default="inkling", choices=sorted(PRESETS), help="engine preset the console controls (default: llama-server); mikasa = the CUDA daemon behind server/mikasa_server.py")
     ap.add_argument("--port", type=int, default=8770); ap.add_argument("--no-exec", action="store_true"); ap.add_argument("--sandbox", action="store_true", help="run code in the soft sandbox (temp dir, rlimits, scrubbed env)")
-    a = ap.parse_args(); NO_EXEC = a.no_exec; SANDBOX = a.sandbox; TOKEN = token()
+    a = ap.parse_args(); ACTIVE = a.engine; NO_EXEC = a.no_exec; SANDBOX = a.sandbox; TOKEN = token()
     host = a.host or subprocess.check_output(["tailscale", "ip", "-4"], text=True).split()[0]
     global TAILNET_IP
     TAILNET_IP = host

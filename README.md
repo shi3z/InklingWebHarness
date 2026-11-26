@@ -43,6 +43,13 @@ The console prints its URL with the token, `http://<host>:8770/?token=...`. The 
 stored in a `SameSite=Strict` cookie after the first visit. The engine command and port are defined in `PRESETS` at the top of
 `webui.py`; edit them for your paths, or start the engine yourself on the same port.
 
+## Using the mikasa engine instead of llama-server
+
+`python3 webui.py --engine mikasa` makes the console's engine box and all tasks use the `mikasa` preset: the CUDA daemon from
+https://github.com/shi3z/mikasa behind its OpenAI-compatible server (port 8767, 4 slots x 64K context, prefix cache). The paths in
+`PRESETS["mikasa"]` assume `~/rrr/mikasa` (built `mikasa_daemon`) and `~/rrr/gguf/Inkling-2-Mini-UD-Q4_K_XL.gguf`; edit them for your machine.
+Both presets use port 8767, so readiness also checks `/props` `build_info`. The default stays llama-server.
+
 ## The console
 
 * **Parallel tasks.** Up to `MAX_PARALLEL` (4, = engine slots) run at once; the rest queue. Each task has its own work folder
